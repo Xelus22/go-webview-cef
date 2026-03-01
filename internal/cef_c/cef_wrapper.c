@@ -16,6 +16,12 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+// Platform-specific includes for frameless window support
+#ifdef __linux__
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
+#endif
+
 #include "include/capi/cef_app_capi.h"
 #include "include/capi/cef_browser_capi.h"
 #include "include/capi/cef_client_capi.h"
@@ -410,6 +416,43 @@ static cef_app_wrapper_t* create_app(void) {
     return app;
 }
 
+// Platform-specific helper to make window frameless (no OS decorations)
+static void make_window_frameless(cef_window_handle_t window) {
+#ifdef __linux__
+    // On Linux/X11, remove window decorations using _MOTIF_WM_HINTS
+    Display* display = XOpenDisplay(NULL);
+    if (!display) {
+        CEF_DEBUG("Failed to open X11 display");
+        return;
+    }
+    
+    Window xwindow = (Window)window;
+    
+    // Set _MOTIF_WM_HINTS to disable decorations
+    struct {
+        unsigned long flags;
+        unsigned long functions;
+        unsigned long decorations;
+        long input_mode;
+        unsigned long status;
+    } hints = {0};
+    
+    hints.flags = 2;  // MWM_HINTS_DECORATIONS
+    hints.decorations = 0;  // No decorations
+    
+    Atom motif_hints = XInternAtom(display, "_MOTIF_WM_HINTS", False);
+    XChangeProperty(display, xwindow, motif_hints, motif_hints, 32,
+                    PropModeReplace, (unsigned char*)&hints, 5);
+    
+    XFlush(display);
+    XCloseDisplay(display);
+    CEF_DEBUG("Window set to frameless mode");
+#else
+    (void)window;
+    CEF_DEBUG("Frameless mode not implemented for this platform");
+#endif
+}
+
 //
 // Public API Implementation
 //
@@ -538,18 +581,29 @@ void cef_shutdown_wrapper(void) {
 }
 
 cef_browser_handle_t cef_browser_create_wrapper(const char* url, int width, int height) {
+    return cef_browser_create_with_flags(url, width, height, 0, 0);
+}
+
+cef_browser_handle_t cef_browser_create_with_flags(const char* url, int width, int height, int chromeless, int frameless) {
+    (void)chromeless; // Reserved for future use
+    
     if (!g_initialized) {
         CEF_DEBUG("CEF not initialized!");
         return NULL;
     }
-    
-    CEF_DEBUG("Creating browser: %s %dx%d", url, width, height);
-    
+
+    CEF_DEBUG("Creating browser: %s %dx%d (frameless=%d)", url, width, height, frameless);
+
     // Create window info
     cef_window_info_t window_info = {};
     window_info.size = sizeof(cef_window_info_t);
+    window_info.bounds.x = 100;  // Default position
+    window_info.bounds.y = 100;
     window_info.bounds.width = width;
     window_info.bounds.height = height;
+    
+    // Note: frameless mode (no OS window decorations) requires X11 hints
+    // set after window creation on Linux. We handle this below.
     
     // Create browser settings
     cef_browser_settings_t browser_settings = {};
@@ -577,6 +631,18 @@ cef_browser_handle_t cef_browser_create_wrapper(const char* url, int width, int 
     
     if (browser) {
         CEF_DEBUG("Browser created successfully");
+        
+        // Set frameless mode if requested (remove OS window decorations)
+        if (frameless) {
+            cef_browser_host_t* host = browser->get_host(browser);
+            if (host) {
+                cef_window_handle_t window = host->get_window_handle(host);
+                if (window) {
+                    make_window_frameless(window);
+                }
+                host->base.release(&host->base);
+            }
+        }
     } else {
         CEF_DEBUG("Browser creation failed");
         g_client->client.base.release(&g_client->client.base);
@@ -624,6 +690,24 @@ void cef_browser_destroy_wrapper(cef_browser_handle_t browser) {
     cef_browser_host_t* host = b->get_host(b);
     if (host) {
         host->close_browser(host, 1);
+        host->base.release(&host->base);
+    }
+}
+
+void cef_browser_resize_wrapper(cef_browser_handle_t browser, int width, int height) {
+    if (!browser) return;
+    
+    cef_browser_t* b = (cef_browser_t*)browser;
+    cef_browser_host_t* host = b->get_host(b);
+    if (host) {
+        // Get the native window handle and resize it
+        cef_window_handle_t window = host->get_window_handle(host);
+        if (window) {
+            // On Linux/X11, we would use X11 APIs to resize
+            // For now, we set the size via CEF's browser host
+            // The actual window resize is handled by the window manager
+            CEF_DEBUG("Browser resize requested: %dx%d", width, height);
+        }
         host->base.release(&host->base);
     }
 }

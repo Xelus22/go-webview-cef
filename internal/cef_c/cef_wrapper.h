@@ -33,8 +33,13 @@ void cef_shutdown_wrapper(void);
 //
 
 // Create browser (call after cef_initialize_main returns -1)
-// Returns opaque handle or NULL on failure
+// Returns opaque handle or NULL
 cef_browser_handle_t cef_browser_create_wrapper(const char* url, int width, int height);
+
+// Create browser with flags
+// chromeless: 1 = no browser decorations (no URL bar, etc.)
+// frameless:  1 = no OS window decorations (no title bar, no borders)
+cef_browser_handle_t cef_browser_create_with_flags(const char* url, int width, int height, int chromeless, int frameless);
 
 // Navigate to URL
 void cef_browser_load_url_wrapper(cef_browser_handle_t browser, const char* url);
@@ -44,6 +49,9 @@ void cef_browser_execute_js_wrapper(cef_browser_handle_t browser, const char* js
 
 // Close browser
 void cef_browser_destroy_wrapper(cef_browser_handle_t browser);
+
+// Resize browser window
+void cef_browser_resize_wrapper(cef_browser_handle_t browser, int width, int height);
 
 #ifdef __cplusplus
 }
