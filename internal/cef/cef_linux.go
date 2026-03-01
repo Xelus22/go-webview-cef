@@ -19,7 +19,7 @@ extern int cef_initialize_main(int argc, char** argv);
 extern void cef_run_message_loop_wrapper(void);
 extern void cef_shutdown_wrapper(void);
 extern cef_browser_handle_t cef_browser_create_wrapper(const char* url, int width, int height);
-extern cef_browser_handle_t cef_browser_create_with_flags(const char* url, int width, int height, int chromeless, int frameless);
+extern cef_browser_handle_t cef_browser_create_with_flags(const char* url, int width, int height, int chromeless, int frameless, const char* title);
 extern void cef_browser_load_url_wrapper(cef_browser_handle_t browser, const char* url);
 extern void cef_browser_execute_js_wrapper(cef_browser_handle_t browser, const char* js);
 extern void cef_browser_destroy_wrapper(cef_browser_handle_t browser);
@@ -98,21 +98,31 @@ type Browser struct {
 
 // NewBrowser creates a new browser window
 func NewBrowser(url string, width, height int) *Browser {
-	return NewBrowserChromeless(url, width, height, false)
+	return NewBrowserChromeless(url, width, height, false, false, "")
 }
 
-// NewBrowserChromeless creates a new browser window with optional frameless mode
-// frameless=true removes OS window decorations (title bar, borders)
-func NewBrowserChromeless(url string, width, height int, frameless bool) *Browser {
+// NewBrowserChromeless creates a new browser window with optional chromeless and frameless modes
+// chromeless=true removes browser decorations (no URL bar, settings, profile UI)
+// frameless=true removes OS window decorations (title bar, borders, native buttons)
+// title sets the window title (empty string uses default)
+func NewBrowserChromeless(url string, width, height int, chromeless, frameless bool, title string) *Browser {
 	curl := C.CString(url)
 	defer C.free(unsafe.Pointer(curl))
+
+	ctitle := C.CString(title)
+	defer C.free(unsafe.Pointer(ctitle))
+
+	var chromelessInt C.int = 0
+	if chromeless {
+		chromelessInt = 1
+	}
 
 	var framelessInt C.int = 0
 	if frameless {
 		framelessInt = 1
 	}
 
-	ptr := C.cef_browser_create_with_flags(curl, C.int(width), C.int(height), 0, framelessInt)
+	ptr := C.cef_browser_create_with_flags(curl, C.int(width), C.int(height), chromelessInt, framelessInt, ctitle)
 	if ptr == nil {
 		return nil
 	}

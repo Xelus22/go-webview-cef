@@ -39,7 +39,8 @@ cef_browser_handle_t cef_browser_create_wrapper(const char* url, int width, int 
 // Create browser with flags
 // chromeless: 1 = no browser decorations (no URL bar, etc.)
 // frameless:  1 = no OS window decorations (no title bar, no borders)
-cef_browser_handle_t cef_browser_create_with_flags(const char* url, int width, int height, int chromeless, int frameless);
+// title:      window title (can be NULL for default)
+cef_browser_handle_t cef_browser_create_with_flags(const char* url, int width, int height, int chromeless, int frameless, const char* title);
 
 // Navigate to URL
 void cef_browser_load_url_wrapper(cef_browser_handle_t browser, const char* url);

@@ -20,6 +20,7 @@
 #ifdef __linux__
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
+#include <X11/Xutil.h>
 #endif
 
 #include "include/capi/cef_app_capi.h"
@@ -30,6 +31,7 @@
 #include "include/capi/cef_base_capi.h"
 #include "include/cef_api_hash.h"
 #include "include/cef_api_versions.h"
+#include "include/internal/cef_types_runtime.h"
 
 // Maximum number of browsers we can track
 #define MAX_BROWSERS 64
@@ -59,6 +61,12 @@ typedef struct {
 static int g_initialized = 0;
 static cef_app_wrapper_t* g_app = NULL;
 static cef_client_wrapper_t* g_client = NULL;
+
+// Frameless window state (for X11 parent window)
+#ifdef __linux__
+static Window g_parent_window = 0;
+static Display* g_display = NULL;
+#endif
 
 //
 // Reference counting implementations
@@ -178,12 +186,80 @@ static struct _cef_render_process_handler_t* CEF_CALLBACK get_render_process_han
 }
 
 //
+// Context Menu Handler - Disable right-click menu
+//
+
+typedef struct _cef_context_menu_handler_wrapper_t {
+    cef_context_menu_handler_t handler;
+    atomic_int ref_count;
+} cef_context_menu_handler_wrapper_t;
+
+static void CEF_CALLBACK context_menu_handler_add_ref(cef_base_ref_counted_t* self) {
+    cef_context_menu_handler_wrapper_t* handler = (cef_context_menu_handler_wrapper_t*)self;
+    atomic_fetch_add(&handler->ref_count, 1);
+}
+
+static int CEF_CALLBACK context_menu_handler_release(cef_base_ref_counted_t* self) {
+    cef_context_menu_handler_wrapper_t* handler = (cef_context_menu_handler_wrapper_t*)self;
+    int count = atomic_fetch_sub(&handler->ref_count, 1) - 1;
+    if (count == 0) {
+        free(handler);
+        return 1;
+    }
+    return 0;
+}
+
+static int CEF_CALLBACK context_menu_handler_has_one_ref(cef_base_ref_counted_t* self) {
+    cef_context_menu_handler_wrapper_t* handler = (cef_context_menu_handler_wrapper_t*)self;
+    return atomic_load(&handler->ref_count) == 1;
+}
+
+static int CEF_CALLBACK context_menu_handler_has_at_least_one_ref(cef_base_ref_counted_t* self) {
+    cef_context_menu_handler_wrapper_t* handler = (cef_context_menu_handler_wrapper_t*)self;
+    return atomic_load(&handler->ref_count) >= 1;
+}
+
+static void CEF_CALLBACK on_before_context_menu(
+    struct _cef_context_menu_handler_t* self,
+    struct _cef_browser_t* browser,
+    struct _cef_frame_t* frame,
+    struct _cef_context_menu_params_t* params,
+    struct _cef_menu_model_t* model) {
+    (void)self;
+    (void)browser;
+    (void)frame;
+    (void)params;
+    // Clear all menu items to disable context menu
+    model->clear(model);
+}
+
+static cef_context_menu_handler_wrapper_t* create_context_menu_handler(void) {
+    cef_context_menu_handler_wrapper_t* handler = (cef_context_menu_handler_wrapper_t*)calloc(1, sizeof(cef_context_menu_handler_wrapper_t));
+    if (!handler) return NULL;
+    
+    handler->handler.base.size = sizeof(cef_context_menu_handler_t);
+    handler->handler.base.add_ref = context_menu_handler_add_ref;
+    handler->handler.base.release = context_menu_handler_release;
+    handler->handler.base.has_one_ref = context_menu_handler_has_one_ref;
+    handler->handler.base.has_at_least_one_ref = context_menu_handler_has_at_least_one_ref;
+    handler->handler.on_before_context_menu = on_before_context_menu;
+    
+    atomic_store(&handler->ref_count, 1);
+    return handler;
+}
+
+//
 // Client callbacks
 //
 
 static struct _cef_context_menu_handler_t* CEF_CALLBACK get_context_menu_handler(
     struct _cef_client_t* self) {
     (void)self;
+    cef_context_menu_handler_wrapper_t* handler = create_context_menu_handler();
+    if (handler) {
+        handler->handler.base.add_ref(&handler->handler.base);
+        return &handler->handler;
+    }
     return NULL;
 }
 
@@ -581,33 +657,152 @@ void cef_shutdown_wrapper(void) {
 }
 
 cef_browser_handle_t cef_browser_create_wrapper(const char* url, int width, int height) {
-    return cef_browser_create_with_flags(url, width, height, 0, 0);
+    return cef_browser_create_with_flags(url, width, height, 0, 0, NULL);
 }
 
-cef_browser_handle_t cef_browser_create_with_flags(const char* url, int width, int height, int chromeless, int frameless) {
-    (void)chromeless; // Reserved for future use
-    
+cef_browser_handle_t cef_browser_create_with_flags(const char* url, int width, int height, int chromeless, int frameless, const char* title) {
     if (!g_initialized) {
         CEF_DEBUG("CEF not initialized!");
         return NULL;
     }
 
-    CEF_DEBUG("Creating browser: %s %dx%d (frameless=%d)", url, width, height, frameless);
+    CEF_DEBUG("Creating browser: %s %dx%d (chromeless=%d, frameless=%d)", url, width, height, chromeless, frameless);
+
+#ifdef __linux__
+    // Create our own X11 window first (gives us control over decorations)
+    Window parent_window = 0;
+    if (frameless) {
+        Display* display = XOpenDisplay(NULL);
+        if (display) {
+            int screen = DefaultScreen(display);
+            Window root = RootWindow(display, screen);
+            
+            // Create a window without decorations
+            XSetWindowAttributes attrs;
+            attrs.event_mask = ExposureMask | KeyPressMask | KeyReleaseMask |
+                              ButtonPressMask | ButtonReleaseMask | PointerMotionMask |
+                              FocusChangeMask | StructureNotifyMask;
+            
+            unsigned long attr_mask = CWEventMask;
+            
+            parent_window = XCreateWindow(
+                display, root,
+                100, 100, width, height, 0,
+                CopyFromParent, InputOutput, CopyFromParent,
+                attr_mask, &attrs
+            );
+            
+            if (parent_window) {
+                // Set window attributes like electrobun
+                XSetWindowAttributes attrs;
+                attrs.background_pixel = WhitePixel(display, screen);
+                attrs.border_pixel = BlackPixel(display, screen);
+                attrs.colormap = DefaultColormap(display, screen);
+                XChangeWindowAttributes(display, parent_window, CWBackPixel | CWBorderPixel | CWColormap, &attrs);
+                
+                // Set window title
+                XStoreName(display, parent_window, "CEF App");
+                
+                // Set WM_CLASS for proper taskbar icon matching
+                XClassHint class_hint;
+                class_hint.res_name = (char*)"CEFApp";
+                class_hint.res_class = (char*)"CEFApp";
+                XSetClassHint(display, parent_window, &class_hint);
+                
+                // Set window protocols for close button
+                Atom wmDelete = XInternAtom(display, "WM_DELETE_WINDOW", False);
+                XSetWMProtocols(display, parent_window, &wmDelete, 1);
+                
+                // Remove window decorations using _MOTIF_WM_HINTS (for frameless)
+                Atom wmHints = XInternAtom(display, "_MOTIF_WM_HINTS", False);
+                struct {
+                    unsigned long flags;
+                    unsigned long functions;
+                    unsigned long decorations;
+                    long inputMode;
+                    unsigned long status;
+                } hints = { 2, 0, 0, 0, 0 };  // MWM_HINTS_DECORATIONS = 2, no decorations
+                
+                XChangeProperty(display, parent_window, wmHints, wmHints, 32,
+                               PropModeReplace, (unsigned char*)&hints, 5);
+                
+                // Set window type for better compositor handling
+                Atom wmWindowType = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
+                Atom wmWindowTypeNormal = XInternAtom(display, "_NET_WM_WINDOW_TYPE_NORMAL", False);
+                XChangeProperty(display, parent_window, wmWindowType, XA_ATOM, 32,
+                               PropModeReplace, (unsigned char*)&wmWindowTypeNormal, 1);
+                
+                // Set size hints
+                XSizeHints* sizeHints = XAllocSizeHints();
+                if (sizeHints) {
+                    sizeHints->flags = PPosition | PSize;
+                    sizeHints->x = 100;
+                    sizeHints->y = 100;
+                    sizeHints->width = width;
+                    sizeHints->height = height;
+                    XSetWMNormalHints(display, parent_window, sizeHints);
+                    XFree(sizeHints);
+                }
+                
+                // DON'T map the window yet - wait for CEF to be created
+                XFlush(display);
+                
+                CEF_DEBUG("Created frameless X11 parent window: %lu (not mapped yet)", parent_window);
+                
+                // Store globally so we can map after browser creation
+                g_parent_window = parent_window;
+                g_display = display;
+            }
+        }
+    }
+#endif
 
     // Create window info
     cef_window_info_t window_info = {};
     window_info.size = sizeof(cef_window_info_t);
-    window_info.bounds.x = 100;  // Default position
-    window_info.bounds.y = 100;
-    window_info.bounds.width = width;
-    window_info.bounds.height = height;
+
+    // Set runtime style based on chromeless flag
+    // CEF_RUNTIME_STYLE_ALLOY = no Chrome UI (no URL bar, settings, etc.)
+    // CEF_RUNTIME_STYLE_CHROME = full Chrome UI
+    if (chromeless) {
+        window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+        CEF_DEBUG("Using Alloy runtime style (no Chrome UI)");
+    } else {
+        window_info.runtime_style = CEF_RUNTIME_STYLE_CHROME;
+        CEF_DEBUG("Using Chrome runtime style (full UI)");
+    }
+
+    // Set window name (title) - use provided title or default
+    if (title && strlen(title) > 0) {
+        cef_string_utf8_to_utf16(title, strlen(title), &window_info.window_name);
+    } else {
+        cef_string_utf8_to_utf16("App", 3, &window_info.window_name);
+    }
+
+#ifdef __linux__
+    if (frameless && parent_window) {
+        // Use our parent window - CEF will be embedded as a child
+        window_info.parent_window = parent_window;
+        window_info.bounds.x = 0;
+        window_info.bounds.y = 0;
+        window_info.bounds.width = width;
+        window_info.bounds.height = height;
+        window_info.windowless_rendering_enabled = 0;
+    } else
+#endif
+    {
+        // Default: CEF creates its own window
+        window_info.bounds.x = 100;
+        window_info.bounds.y = 100;
+        window_info.bounds.width = width;
+        window_info.bounds.height = height;
+    }
     
-    // Note: frameless mode (no OS window decorations) requires X11 hints
-    // set after window creation on Linux. We handle this below.
-    
-    // Create browser settings
+    // Create browser settings - disable UI elements
     cef_browser_settings_t browser_settings = {};
     browser_settings.size = sizeof(cef_browser_settings_t);
+    // Disable javascript access to clipboard
+    browser_settings.javascript_access_clipboard = 0;  // STATE_DISABLED
     
     // Convert URL to CEF string
     cef_string_t cef_url = {};
@@ -628,21 +823,22 @@ cef_browser_handle_t cef_browser_create_with_flags(const char* url, int width, i
     );
     
     cef_string_clear(&cef_url);
-    
+    cef_string_clear(&window_info.window_name);
+
     if (browser) {
         CEF_DEBUG("Browser created successfully");
         
-        // Set frameless mode if requested (remove OS window decorations)
-        if (frameless) {
-            cef_browser_host_t* host = browser->get_host(browser);
-            if (host) {
-                cef_window_handle_t window = host->get_window_handle(host);
-                if (window) {
-                    make_window_frameless(window);
-                }
-                host->base.release(&host->base);
-            }
+#ifdef __linux__
+        // Now that CEF is created, map the parent window
+        if (g_parent_window && g_display) {
+            CEF_DEBUG("Mapping parent window now that CEF is ready");
+            XMapWindow(g_display, g_parent_window);
+            XRaiseWindow(g_display, g_parent_window);
+            XSetInputFocus(g_display, g_parent_window, RevertToParent, CurrentTime);
+            XFlush(g_display);
+            CEF_DEBUG("Parent window mapped and raised");
         }
+#endif
     } else {
         CEF_DEBUG("Browser creation failed");
         g_client->client.base.release(&g_client->client.base);

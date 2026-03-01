@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Go + CEF WebView Demo Runner Script
-# This script builds and runs the CEF demo application
+# This script builds and runs the CEF demo applications
 
 set -e
 
@@ -14,7 +14,7 @@ NC='\033[0m' # No Color
 # Configuration
 BUILD_DIR="build"
 CEF_DIR="third_party/cef/linux_64"
-DEMO_NAME="demo"
+DEFAULT_EXAMPLE="tauri_style"
 
 # Function to print colored output
 print_status() {
@@ -42,8 +42,9 @@ check_cef() {
 
 # Build the demo
 build_demo() {
-    print_status "Building demo application..."
-    go build -o "$BUILD_DIR/$DEMO_NAME" ./example
+    local example_name="$1"
+    print_status "Building example: $example_name"
+    go build -o "$BUILD_DIR/$example_name" "./example/$example_name"
     print_status "Build successful!"
 }
 
@@ -103,25 +104,27 @@ copy_runtime_files() {
 
 # Run the demo
 run_demo() {
-    print_status "Running demo application..."
+    local example_name="$1"
+    shift
+    print_status "Running example: $example_name"
     print_status "Build directory: $(pwd)/$BUILD_DIR"
-    
+
     # Set library path and run
     export LD_LIBRARY_PATH="$(pwd)/$BUILD_DIR:$LD_LIBRARY_PATH"
-    
+
     # Set additional environment variables for CEF
     export DISPLAY="${DISPLAY:-:0}"
-    
+
     print_status "Environment:"
     echo "  DISPLAY=$DISPLAY"
     echo "  LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
     echo "  CWD=$(pwd)"
-    
+
     print_status "Starting demo..."
     print_status "Note: CEF requires a display server (X11/Wayland)"
     print_status "If you see GPU errors, the app needs a desktop environment"
     echo "========================================"
-    cd "$BUILD_DIR" && "./$DEMO_NAME" "$@"
+    cd "$BUILD_DIR" && "./$example_name" "$@"
 }
 
 # Clean build artifacts
@@ -136,13 +139,17 @@ show_help() {
     cat << EOF
 Go + CEF WebView Demo Runner
 
-Usage: $0 [command] [options]
+Usage: $0 [command] [example] [options]
 
 Commands:
-    build       Build the demo application (default)
-    run         Build and run the demo application
+    build       Build the specified example (default)
+    run         Build and run the specified example
     clean       Remove build artifacts
     help        Show this help message
+
+Examples available:
+    tauri_style  Tauri-style API demo with chromeless/frameless options (default)
+    basic        Basic webview usage example
 
 Options:
     --rebuild   Force rebuild even if binary exists
@@ -151,12 +158,15 @@ Options:
 Environment Requirements:
     - X11 or Wayland display server
     - Desktop environment (for GPU support)
-    
-Examples:
-    $0                    # Build the demo
-    $0 run                # Build and run the demo
-    $0 run --rebuild      # Force rebuild and run
-    $0 clean              # Clean build files
+
+Usage Examples:
+    $0                           # Build default example (tauri_style)
+    $0 build                     # Build default example (tauri_style)
+    $0 build basic               # Build basic example
+    $0 run                       # Build and run default example
+    $0 run tauri_style           # Build and run tauri_style example
+    $0 run basic --rebuild       # Force rebuild and run basic example
+    $0 clean                     # Clean build files
 
 Note: If running in a headless/container environment, you may need:
     - Xvfb for virtual display
@@ -167,10 +177,19 @@ EOF
 # Main execution
 main() {
     local command="${1:-build}"
+    local example_name="$DEFAULT_EXAMPLE"
     local rebuild=false
     local debug=false
-    
-    # Parse arguments
+
+    # Check if second argument is an example name or option
+    if [ -n "$2" ] && [[ "$2" != --* ]]; then
+        example_name="$2"
+        shift 2
+    else
+        shift 1
+    fi
+
+    # Parse remaining arguments for options
     for arg in "$@"; do
         case "$arg" in
             --rebuild)
@@ -181,25 +200,35 @@ main() {
                 ;;
         esac
     done
-    
+
+    # Validate example exists
+    if [ ! -d "example/$example_name" ]; then
+        print_error "Example not found: $example_name"
+        print_status "Available examples:"
+        for ex in example/*/; do
+            echo "  - $(basename "$ex")"
+        done
+        exit 1
+    fi
+
     case "$command" in
         build)
             check_cef
-            if [ "$rebuild" = true ] || [ ! -f "$BUILD_DIR/$DEMO_NAME" ]; then
-                build_demo
+            if [ "$rebuild" = true ] || [ ! -f "$BUILD_DIR/$example_name" ]; then
+                build_demo "$example_name"
                 copy_runtime_files
             else
                 print_status "Demo already built. Use --rebuild to force rebuild."
             fi
-            print_status "Build complete! Run with: $0 run"
+            print_status "Build complete! Run with: $0 run $example_name"
             ;;
         run)
             check_cef
-            if [ "$rebuild" = true ] || [ ! -f "$BUILD_DIR/$DEMO_NAME" ]; then
-                build_demo
+            if [ "$rebuild" = true ] || [ ! -f "$BUILD_DIR/$example_name" ]; then
+                build_demo "$example_name"
                 copy_runtime_files
             fi
-            run_demo "${@:2}"
+            run_demo "$example_name" "$@"
             ;;
         clean)
             clean

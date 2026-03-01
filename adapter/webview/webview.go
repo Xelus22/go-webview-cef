@@ -37,6 +37,7 @@ type webview struct {
 	height      int
 	url         string
 	htmlContent string // HTML to inject after load
+	chromeless  bool   // Chromeless window (no URL bar, settings UI)
 	frameless   bool   // Frameless window (no OS decorations)
 	bindings    map[string]reflect.Value
 	mu          sync.RWMutex
@@ -70,12 +71,8 @@ func (w *webview) Run() {
 		panic("Failed to initialize CEF")
 	}
 
-	// Create browser with frameless support
-	if w.frameless {
-		w.browser = cef.NewBrowserChromeless(w.url, w.width, w.height, true)
-	} else {
-		w.browser = cef.NewBrowser(w.url, w.width, w.height)
-	}
+	// Create browser with chromeless/frameless support
+	w.browser = cef.NewBrowserChromeless(w.url, w.width, w.height, w.chromeless, w.frameless, w.title)
 	if w.browser == nil {
 		panic("Failed to create browser")
 	}
@@ -284,13 +281,14 @@ func (a *App) Run() error {
 
 	// Load HTML if provided - set URL before Run so browser is created with it
 	if a.html != "" {
-		// Type assert to set URL and frameless mode before browser creation
+		// Type assert to set URL and chromeless/frameless mode before browser creation
 		if wv, ok := a.webview.(*webview); ok {
 			// Use about:blank first, then inject HTML via JavaScript for better compatibility
 			wv.SetURL("about:blank")
 			// Store HTML for injection after load
 			wv.htmlContent = a.html
-			// Set frameless mode
+			// Set chromeless and frameless mode
+			wv.chromeless = a.config.Chromeless
 			wv.frameless = a.config.Frameless
 		}
 	}
