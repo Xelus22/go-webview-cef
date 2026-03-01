@@ -1,3 +1,6 @@
+// CEF 145 Wrapper - Based on cef-rs architecture
+// Key insight: execute_process with NULL app handles subprocesses internally
+
 #ifndef CEF_WRAPPER_H
 #define CEF_WRAPPER_H
 
@@ -7,31 +10,40 @@ extern "C" {
 
 #include <stdint.h>
 
-// Opaque handles
-typedef void* cef_browser_t;
-typedef void* cef_callback_t;
+// Opaque handle types
+typedef void* cef_browser_handle_t;
 
-// Lifecycle
-void cef_initialize();
-void cef_run();
-void cef_shutdown();
+//
+// Lifecycle functions
+//
 
-// Browser
-cef_browser_t cef_browser_create(const char* url, int width, int height);
-void cef_browser_load_url(cef_browser_t browser, const char* url);
-void cef_browser_execute_js(cef_browser_t browser, const char* js);
-void cef_browser_destroy(cef_browser_t browser);
+// Initialize CEF (call this FIRST in main)
+// Returns: >=0 if this is a subprocess (exit with this code)
+//          -1 if this is the browser process (continue and call cef_run())
+int cef_initialize_main(int argc, char** argv);
 
-// Window handle (platform-specific)
-void* cef_get_native_window_handle(cef_browser_t browser);
+// Run the message loop (browser process only)
+void cef_run_message_loop_wrapper(void);
 
-// Messaging bridge
-void cef_register_js_callback(const char* name, cef_callback_t callback);
-void cef_send_message_to_js(cef_browser_t browser, const char* message);
+// Shutdown CEF (browser process only)
+void cef_shutdown_wrapper(void);
 
-// Process helpers
-int cef_is_subprocess();
-void cef_subprocess_entry();
+//
+// Browser functions
+//
+
+// Create browser (call after cef_initialize_main returns -1)
+// Returns opaque handle or NULL on failure
+cef_browser_handle_t cef_browser_create_wrapper(const char* url, int width, int height);
+
+// Navigate to URL
+void cef_browser_load_url_wrapper(cef_browser_handle_t browser, const char* url);
+
+// Execute JavaScript
+void cef_browser_execute_js_wrapper(cef_browser_handle_t browser, const char* js);
+
+// Close browser
+void cef_browser_destroy_wrapper(cef_browser_handle_t browser);
 
 #ifdef __cplusplus
 }

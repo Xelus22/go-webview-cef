@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	CEFVersion = "132.3.1+g144febe+chromium-132.0.6834.83" // Stable version
+	CEFVersion = "145.0.26+g6ed7554+chromium-145.0.7632.110" // CEF 145 - Chromium 145.0.7632.110
 )
 
 func main() {

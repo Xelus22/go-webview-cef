@@ -34,6 +34,7 @@ type webview struct {
 	title     string
 	width     int
 	height    int
+	url       string
 	bindings  map[string]reflect.Value
 	mu        sync.RWMutex
 	dispatch  chan func()
@@ -49,6 +50,7 @@ func New(debug bool) WebView {
 		terminate: make(chan struct{}),
 		width:     800,
 		height:    600,
+		url:       "about:blank",
 	}
 
 	runtime.SetFinalizer(w, (*webview).Destroy)
@@ -57,13 +59,19 @@ func New(debug bool) WebView {
 
 // Run starts the main loop
 func (w *webview) Run() {
-	if cef.IsSubprocess() {
-		cef.SubprocessEntry()
-		return
+	// Add flags to disable GPU for WSL compatibility
+	cef.DisableGPU()
+
+	// Initialize CEF (handles subprocess internally)
+	if !cef.Initialize() {
+		panic("Failed to initialize CEF")
 	}
 
-	// Initialize CEF with browser (will be created in OnContextInitialized)
-	cef.InitializeWithBrowser("about:blank", w.width, w.height)
+	// Create browser
+	w.browser = cef.NewBrowser(w.url, w.width, w.height)
+	if w.browser == nil {
+		panic("Failed to create browser")
+	}
 
 	// Run CEF message loop
 	cef.Run()
@@ -89,14 +97,13 @@ func (w *webview) Destroy() {
 		w.browser.Destroy()
 		w.browser = nil
 	}
+	cef.Shutdown()
 }
 
 // Window returns the native window handle
 func (w *webview) Window() unsafe.Pointer {
-	if w.browser == nil {
-		return nil
-	}
-	return w.browser.NativeHandle()
+	// Native handle not exposed in simplified API
+	return nil
 }
 
 // SetTitle sets the window title
@@ -115,6 +122,7 @@ func (w *webview) SetSize(width int, height int, hint int) {
 
 // Navigate loads a URL
 func (w *webview) Navigate(url string) {
+	w.url = url
 	if w.browser != nil {
 		w.browser.Navigate(url)
 	}

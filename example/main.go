@@ -1,23 +1,11 @@
 package main
 
 import (
-	"os"
-
 	"github.com/xelus/go-webview-cef/adapter/webview"
-	"github.com/xelus/go-webview-cef/internal/cef"
 )
 
 func main() {
-	// Pass command line args to CEF (required for multi-process model)
-	cef.SetArgs(len(os.Args), os.Args)
-
-	// Handle subprocess (renderer, GPU, etc.)
-	if cef.IsSubprocess() {
-		cef.SubprocessEntry()
-		return
-	}
-
-	// Create webview
+	// Create webview (handles CEF initialization internally)
 	w := webview.New(false)
 	defer w.Destroy()
 

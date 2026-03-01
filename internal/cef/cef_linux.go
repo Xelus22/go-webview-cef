@@ -3,72 +3,121 @@
 
 package cef
 
-// #cgo CFLAGS: -I${SRCDIR}/../../third_party/cef/linux_64/include
-// #cgo LDFLAGS: -L${SRCDIR}/../../third_party/cef/linux_64/Release -lcef -Wl,-rpath,'$ORIGIN'
-// #include <stdlib.h>
-// #include "cef_wrapper.h"
-import "C"
-import "unsafe"
+/*
+#cgo CFLAGS: -I${SRCDIR}/../../third_party/cef/linux_64 -I${SRCDIR}/../cef_c
+#cgo LDFLAGS: -L${SRCDIR}/../../third_party/cef/linux_64/Release -lcef -Wl,-rpath,'$ORIGIN'
 
-// Initialize initializes the CEF framework
-func Initialize() {
-	C.cef_wrapper_initialize()
+#include <stdlib.h>
+#include "cef_wrapper.h"
+#include "cef_wrapper.c"
+*/
+import "C"
+import (
+	"os"
+	"unsafe"
+)
+
+// disableGPUFlags stores whether GPU should be disabled
+var disableGPUFlags = false
+
+// DisableGPU adds flags to disable GPU rendering (useful for WSL/VMs)
+func DisableGPU() {
+	disableGPUFlags = true
 }
 
-// InitializeWithBrowser initializes CEF and queues a browser for creation
-func InitializeWithBrowser(url string, width, height int) {
-	curl := C.CString(url)
-	defer C.free(unsafe.Pointer(curl))
-	C.cef_wrapper_initialize_with_browser(curl, C.int(width), C.int(height))
+// Initialize initializes CEF and handles subprocess detection
+// Returns: true if this is the browser process (continue running)
+//
+//	false if this is a subprocess (should exit)
+func Initialize() bool {
+	// Add GPU disable flags if requested (must be before CEF subprocess spawns)
+	if disableGPUFlags {
+		os.Args = append(os.Args,
+			"--disable-gpu",
+			"--disable-gpu-compositing",
+			"--disable-software-rasterizer",
+			"--disable-features=VizDisplayCompositor,UseSkiaRenderer",
+			"--single-process",
+		)
+	}
+
+	// Convert Go args to C args
+	argc := len(os.Args)
+	cArgs := make([]*C.char, argc)
+	for i, arg := range os.Args {
+		cArgs[i] = C.CString(arg)
+	}
+
+	// Call CEF initialize main
+	ret := C.cef_initialize_main(C.int(argc), &cArgs[0])
+
+	// Note: We don't free cArgs because CEF keeps references to them
+	// for the lifetime of the process
+
+	// ret >= 0 means subprocess - should exit with that code
+	// ret == -1 means browser process - continue
+	// ret == -2 means error
+	if ret >= 0 {
+		// Subprocess - exit
+		os.Exit(int(ret))
+	}
+
+	return ret == -1
 }
 
 // Run starts the CEF message loop
 func Run() {
-	C.cef_wrapper_run()
+	C.cef_run_message_loop_wrapper()
 }
 
 // Shutdown cleans up CEF resources
 func Shutdown() {
-	C.cef_wrapper_shutdown()
+	C.cef_shutdown_wrapper()
 }
 
-// IsSubprocess returns true if running as a CEF subprocess
-func IsSubprocess() bool {
-	return C.cef_is_subprocess() != 0
+// Browser represents a CEF browser instance
+type Browser struct {
+	ptr C.cef_browser_handle_t
 }
 
-// SubprocessEntry is the entry point for CEF subprocesses
-func SubprocessEntry() {
-	C.cef_subprocess_entry()
+// NewBrowser creates a new browser window
+func NewBrowser(url string, width, height int) *Browser {
+	curl := C.CString(url)
+	defer C.free(unsafe.Pointer(curl))
+
+	ptr := C.cef_browser_create_wrapper(curl, C.int(width), C.int(height))
+	if ptr == nil {
+		return nil
+	}
+
+	return &Browser{ptr: ptr}
 }
 
-// SetArgs sets the command line arguments for CEF
-func SetArgs(argc int, argv []string) {
-	// Add WSL/WSLg compatible flags
-	gpuFlags := []string{
-		"--no-sandbox",
-		"--disable-gpu",
-		"--disable-gpu-compositing",
-		"--disable-software-rasterizer",
-		"--disable-features=VizDisplayCompositor,GPU",
-		"--use-gl=swiftshader", // Use software rendering
-		"--single-process",     // Simplify process model for containers
+// Navigate loads a new URL
+func (b *Browser) Navigate(url string) {
+	if b.ptr == nil {
+		return
 	}
+	curl := C.CString(url)
+	defer C.free(unsafe.Pointer(curl))
+	C.cef_browser_load_url_wrapper(b.ptr, curl)
+}
 
-	newArgv := append(argv, gpuFlags...)
-	argc = len(newArgv)
-
-	// Convert Go strings to C strings
-	cArgs := make([]*C.char, len(newArgv))
-	for i, arg := range newArgv {
-		cArgs[i] = C.CString(arg)
+// Eval executes JavaScript in the browser
+func (b *Browser) Eval(js string) {
+	if b.ptr == nil {
+		return
 	}
+	cjs := C.CString(js)
+	defer C.free(unsafe.Pointer(cjs))
+	C.cef_browser_execute_js_wrapper(b.ptr, cjs)
+}
 
-	// Call C function to store args (C function copies them)
-	C.cef_set_args(C.int(argc), &cArgs[0])
-
-	// Free the temporary C strings
-	for _, arg := range cArgs {
-		C.free(unsafe.Pointer(arg))
+// Destroy closes and cleans up the browser
+func (b *Browser) Destroy() {
+	if b.ptr == nil {
+		return
 	}
+	C.cef_browser_destroy_wrapper(b.ptr)
+	b.ptr = nil
 }
