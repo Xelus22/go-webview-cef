@@ -1,0 +1,33 @@
+# CEF Binaries
+third_party/cef/*
+!third_party/cef/.gitkeep
+
+# Build artifacts
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# Go build artifacts
+*.o
+*.obj
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
