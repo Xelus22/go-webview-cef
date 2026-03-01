@@ -144,8 +144,8 @@ const (
 ├── adapter/webview/          # WebView-compatible API
 │   ├── webview.go           # Main webview implementation
 │   └── types.go             # Type definitions
-├── cmd/demo/                 # Demo application
-│   └── main.go              # Example usage
+├── example/                  # Example application
+│   └── main.go              # Demo usage
 ├── internal/cef/             # Go CEF bindings
 │   ├── cef_linux.go         # Linux-specific implementation
 │   ├── cef_darwin.go        # macOS-specific implementation

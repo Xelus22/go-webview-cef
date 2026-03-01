@@ -43,7 +43,7 @@ check_cef() {
 # Build the demo
 build_demo() {
     print_status "Building demo application..."
-    go build -o "$BUILD_DIR/$DEMO_NAME" ./cmd/demo
+    go build -o "$BUILD_DIR/$DEMO_NAME" ./example
     print_status "Build successful!"
 }
 
