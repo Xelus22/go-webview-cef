@@ -14,7 +14,7 @@ NC='\033[0m' # No Color
 # Configuration
 BUILD_DIR="build"
 CEF_DIR="third_party/cef/linux_64"
-DEFAULT_EXAMPLE="tauri_style"
+DEFAULT_EXAMPLE="chromeless_mode"
 
 # Function to print colored output
 print_status() {
@@ -148,8 +148,9 @@ Commands:
     help        Show this help message
 
 Examples available:
-    tauri_style  Tauri-style API demo with chromeless/frameless options (default)
-    basic        Basic webview usage example
+    chromeless_mode          CEF API demo with chromeless mode (default)
+    chromeless_mode_webview  Adapter webview-layer chromeless demo
+    basic                    Basic webview usage example
 
 Options:
     --rebuild   Force rebuild even if binary exists
@@ -160,11 +161,12 @@ Environment Requirements:
     - Desktop environment (for GPU support)
 
 Usage Examples:
-    $0                           # Build default example (tauri_style)
-    $0 build                     # Build default example (tauri_style)
+    $0                           # Build default example (chromeless_mode)
+    $0 build                     # Build default example (chromeless_mode)
     $0 build basic               # Build basic example
     $0 run                       # Build and run default example
-    $0 run tauri_style           # Build and run tauri_style example
+    $0 run chromeless_mode       # Build and run chromeless_mode example
+    $0 run chromeless_mode_webview  # Build and run webview-layer example
     $0 run basic --rebuild       # Force rebuild and run basic example
     $0 clean                     # Clean build files
 

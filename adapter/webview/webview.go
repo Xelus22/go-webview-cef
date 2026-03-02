@@ -4,13 +4,100 @@ package webview
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"reflect"
 	"runtime"
 	"strings"
 	"sync"
 	"unsafe"
 
-	"github.com/xelus/go-webview-cef/internal/cef"
+	"github.com/xelus/go-webview-cef/cef"
+)
+
+// Window hints for SetSize
+const (
+	HintNone  = 0
+	HintFixed = 1
+	HintMin   = 2
+	HintMax   = 3
+)
+
+// WindowOptions contains optional settings for NewWindow
+// This provides compatibility with webview library usage patterns
+type WindowOptions struct {
+	Title      string
+	Width      int
+	Height     int
+	Resizable  bool
+	MinWidth   int
+	MinHeight  int
+	MaxWidth   int
+	MaxHeight  int
+	Fullscreen bool
+	Borderless bool
+	Center     bool
+}
+
+// DialogType represents the type of dialog to show
+// Used for alert/confirm/dialog compatibility
+type DialogType int
+
+const (
+	DialogTypeAlert DialogType = iota
+	DialogTypeConfirm
+	DialogTypePrompt
+	DialogTypeOpenFile
+	DialogTypeSaveFile
+)
+
+// BindingResult represents the result of a JS binding call
+type BindingResult struct {
+	ID     string      `json:"id"`
+	Result interface{} `json:"result,omitempty"`
+	Error  string      `json:"error,omitempty"`
+}
+
+// BindingCall represents a call from JavaScript to Go
+type BindingCall struct {
+	Name string        `json:"name"`
+	ID   string        `json:"id"`
+	Args []interface{} `json:"args"`
+}
+
+// Event represents a webview event
+// Used for event handling compatibility
+type Event struct {
+	Type string
+	Data interface{}
+}
+
+// EventType constants for common events
+const (
+	EventDOMReady     = "domready"
+	EventNavigate     = "navigate"
+	EventLoadStart    = "loadstart"
+	EventLoadEnd      = "loadend"
+	EventTitleChanged = "titlechanged"
+	EventFocus        = "focus"
+	EventBlur         = "blur"
+	EventClose        = "close"
+)
+
+// SizeHint provides a type-safe way to specify size hints
+// This is an alternative to the raw int constants
+type SizeHint int
+
+func (h SizeHint) Int() int {
+	return int(h)
+}
+
+// Predefined size hints using the type
+const (
+	SizeHintNone  SizeHint = HintNone
+	SizeHintFixed SizeHint = HintFixed
+	SizeHintMin   SizeHint = HintMin
+	SizeHintMax   SizeHint = HintMax
 )
 
 // WebView interface matches the standard webview API
@@ -31,18 +118,34 @@ type WebView interface {
 
 // webview implements the WebView interface using CEF
 type webview struct {
-	browser     *cef.Browser
+	webview     *cef.WebView
 	title       string
 	width       int
 	height      int
+	resizable   bool
+	fullscreen  bool
+	maximized   bool
+	x           int
+	y           int
 	url         string
-	htmlContent string // HTML to inject after load
-	chromeless  bool   // Chromeless window (no URL bar, settings UI)
-	frameless   bool   // Frameless window (no OS decorations)
-	bindings    map[string]reflect.Value
-	mu          sync.RWMutex
-	dispatch    chan func()
-	terminate   chan struct{}
+	htmlContent string
+	chromeless  bool
+	frameless   bool
+	initScripts []string
+
+	// WebView2-compat options mapped when possible and warned when unsupported.
+	dataPath                               string
+	browserPath                            string
+	additionalBrowserArgs                  []string
+	language                               string
+	targetCompatibleBrowserVersion         string
+	allowSingleSignOnUsingOSPrimaryAccount bool
+	exclusiveUserDataFolderAccess          bool
+
+	bindings  map[string]reflect.Value
+	mu        sync.RWMutex
+	dispatch  chan func()
+	terminate chan struct{}
 }
 
 // New creates a new webview window
@@ -54,6 +157,9 @@ func New(debug bool) WebView {
 		terminate: make(chan struct{}),
 		width:     800,
 		height:    600,
+		resizable: true,
+		x:         -1,
+		y:         -1,
 		url:       "about:blank",
 	}
 
@@ -63,30 +169,97 @@ func New(debug bool) WebView {
 
 // Run starts the main loop
 func (w *webview) Run() {
-	// Add flags to disable GPU for WSL compatibility
-	cef.DisableGPU()
+	w.applyWebView2CompatOptions()
 
-	// Initialize CEF (handles subprocess internally)
-	if !cef.Initialize() {
-		panic("Failed to initialize CEF")
-	}
-
-	// Create browser with chromeless/frameless support
-	w.browser = cef.NewBrowserChromeless(w.url, w.width, w.height, w.chromeless, w.frameless, w.title)
-	if w.browser == nil {
-		panic("Failed to create browser")
-	}
-
-	// Inject HTML content if provided (more reliable than data URLs)
+	// Create CEF WebView with options
+	opts := cef.DefaultOptions()
+	opts.Title = w.title
+	opts.Width = w.width
+	opts.Height = w.height
+	opts.Resizable = w.resizable
+	opts.Fullscreen = w.fullscreen
+	opts.Maximized = w.maximized
+	opts.X = w.x
+	opts.Y = w.y
+	opts.Frameless = w.frameless
+	opts.Chromeless = w.chromeless
 	if w.htmlContent != "" {
-		// Escape quotes for JavaScript
+		opts.URL = "about:blank"
+	} else {
+		opts.URL = w.url
+	}
+
+	w.webview = cef.New(opts)
+
+	for _, js := range w.initScripts {
+		w.webview.Eval(js)
+	}
+
+	// Set up bindings
+	for name, fn := range w.bindings {
+		w.webview.Bind(name, fn.Interface())
+	}
+
+	// Navigate to URL or inject HTML
+	if w.htmlContent != "" {
+		// Inject HTML via JavaScript
 		html := strings.ReplaceAll(w.htmlContent, `"`, `\"`)
 		html = strings.ReplaceAll(html, "\n", "")
-		w.browser.Eval(`document.open();document.write("` + html + `");document.close();`)
+		w.webview.Eval(`document.open();document.write("` + html + `");document.close();`)
+	} else {
+		w.webview.Navigate(w.url)
 	}
 
-	// Run CEF message loop
-	cef.Run()
+	// Create browser + run message loop.
+	w.webview.Run()
+}
+
+func (w *webview) applyWebView2CompatOptions() {
+	args := make([]string, 0, len(w.additionalBrowserArgs)+1)
+	for _, arg := range w.additionalBrowserArgs {
+		arg = strings.TrimSpace(arg)
+		if arg == "" {
+			continue
+		}
+		args = append(args, arg)
+	}
+	if w.language != "" {
+		args = append(args, "--lang="+w.language)
+	}
+
+	for _, arg := range args {
+		found := false
+		for _, existing := range os.Args {
+			if existing == arg {
+				found = true
+				break
+			}
+		}
+		if !found {
+			os.Args = append(os.Args, arg)
+		}
+	}
+
+	unsupported := make([]string, 0, 5)
+	if w.dataPath != "" {
+		unsupported = append(unsupported, "DataPath")
+	}
+	if w.browserPath != "" {
+		unsupported = append(unsupported, "BrowserPath")
+	}
+	if w.targetCompatibleBrowserVersion != "" {
+		unsupported = append(unsupported, "TargetCompatibleBrowserVersion")
+	}
+	if w.allowSingleSignOnUsingOSPrimaryAccount {
+		unsupported = append(unsupported, "AllowSingleSignOnUsingOSPrimaryAccount")
+	}
+	if w.exclusiveUserDataFolderAccess {
+		unsupported = append(unsupported, "ExclusiveUserDataFolderAccess")
+	}
+
+	if len(unsupported) > 0 {
+		log.Printf("webview adapter: WebView2 options not mapped by CEF backend: %s", strings.Join(unsupported, ", "))
+	}
 }
 
 // Terminate signals the webview to close
@@ -96,18 +269,16 @@ func (w *webview) Terminate() {
 
 // Dispatch schedules a function on the main thread
 func (w *webview) Dispatch(f func()) {
-	select {
-	case w.dispatch <- f:
-	default:
-		// Channel full, drop or handle error
+	if w.webview != nil {
+		w.webview.Dispatch(f)
 	}
 }
 
 // Destroy cleans up the webview
 func (w *webview) Destroy() {
-	if w.browser != nil {
-		w.browser.Destroy()
-		w.browser = nil
+	if w.webview != nil {
+		w.webview.Destroy()
+		w.webview = nil
 	}
 	cef.Shutdown()
 }
@@ -121,15 +292,19 @@ func (w *webview) Window() unsafe.Pointer {
 // SetTitle sets the window title
 func (w *webview) SetTitle(title string) {
 	w.title = title
-	// CEF doesn't have direct window title API in this minimal binding
-	// Would need platform-specific implementation
+	if w.webview != nil {
+		w.webview.SetTitle(title)
+	}
 }
 
 // SetSize sets the window size
 func (w *webview) SetSize(width int, height int, hint int) {
 	w.width = width
 	w.height = height
-	// Actual resize would need platform-specific implementation
+	if w.webview != nil {
+		w.webview.SetSize(width, height)
+	}
+	_ = hint // hint not implemented
 }
 
 // SetURL sets the initial URL for the browser (must be called before Run)
@@ -140,23 +315,27 @@ func (w *webview) SetURL(url string) {
 // Navigate loads a URL
 func (w *webview) Navigate(url string) {
 	w.url = url
-	if w.browser != nil {
-		w.browser.Navigate(url)
+	if w.webview != nil {
+		w.webview.Navigate(url)
 	}
 }
 
 // Init injects JavaScript to be available on all pages
 func (w *webview) Init(js string) {
-	// Store for injection on page load
-	// Simplified implementation - inject immediately if browser exists
-	w.Eval(js)
+	if w.webview == nil {
+		w.initScripts = append(w.initScripts, js)
+		return
+	}
+	w.webview.Eval(js)
 }
 
 // Eval executes JavaScript
 func (w *webview) Eval(js string) {
-	if w.browser != nil {
-		w.browser.Eval(js)
+	if w.webview == nil {
+		w.initScripts = append(w.initScripts, js)
+		return
 	}
+	w.webview.Eval(js)
 }
 
 // Bind binds a Go function to be callable from JavaScript
@@ -171,8 +350,9 @@ func (w *webview) Bind(name string, fn interface{}) error {
 
 	w.bindings[name] = v
 
-	// Inject JavaScript binding
-	w.injectBinding(name, v.Type())
+	if w.webview != nil {
+		return w.webview.Bind(name, fn)
+	}
 
 	return nil
 }
@@ -183,34 +363,10 @@ func (w *webview) Unbind(name string) error {
 	defer w.mu.Unlock()
 
 	delete(w.bindings, name)
+	if w.webview != nil {
+		w.webview.Unbind(name)
+	}
 	return nil
-}
-
-// injectBinding creates JavaScript wrapper for Go function
-func (w *webview) injectBinding(name string, t reflect.Type) {
-	// Generate JS wrapper that calls window.external.invoke
-	js := fmt.Sprintf(`
-        window.%s = function(...args) {
-            return new Promise((resolve, reject) => {
-                const id = Math.random().toString(36).substr(2, 9);
-                window.__goCallbacks[id] = { resolve, reject };
-                window.external.invoke(JSON.stringify({
-                    name: "%s",
-                    id: id,
-                    args: args
-                }));
-            });
-        };
-    `, name, name)
-
-	w.Init(js)
-	w.Init(`window.__goCallbacks = window.__goCallbacks || {};`)
-}
-
-// handleBindingCall processes a JavaScript binding call
-func (w *webview) handleBindingCall(message string) {
-	// Parse message and call appropriate binding
-	// This would be called from the C layer when JS invokes
 }
 
 //
@@ -222,9 +378,23 @@ type AppConfig struct {
 	Title      string
 	Width      int
 	Height     int
+	Resizable  bool
+	Fullscreen bool
+	Maximized  bool
+	X          int
+	Y          int
 	Debug      bool
 	Chromeless bool // Remove browser decorations (no URL bar, etc.)
 	Frameless  bool // Remove OS window decorations (no title bar, borders)
+
+	// WebView2-compat environment options.
+	DataPath                               string
+	BrowserPath                            string
+	AdditionalBrowserArgs                  []string
+	Language                               string
+	TargetCompatibleBrowserVersion         string
+	AllowSingleSignOnUsingOSPrimaryAccount bool
+	ExclusiveUserDataFolderAccess          bool
 }
 
 // App provides a high-level API similar to Tauri/Wails
@@ -242,6 +412,16 @@ func NewApp(config AppConfig) *App {
 	}
 	if config.Height == 0 {
 		config.Height = 600
+	}
+	if !config.Resizable {
+		// Keep parity with previous defaults.
+		config.Resizable = true
+	}
+	if config.X == 0 {
+		config.X = -1
+	}
+	if config.Y == 0 {
+		config.Y = -1
 	}
 
 	return &App{
@@ -263,15 +443,16 @@ func (a *App) LoadHTML(html string) {
 // Run starts the application
 func (a *App) Run() error {
 	// Create webview
-	a.webview = New(a.config.Debug)
+	w := New(a.config.Debug)
+	a.webview = w
 
 	// Set properties
-	a.webview.SetTitle(a.config.Title)
-	a.webview.SetSize(a.config.Width, a.config.Height, HintNone)
+	w.SetTitle(a.config.Title)
+	w.SetSize(a.config.Width, a.config.Height, HintNone)
 
 	// Bind all registered functions
 	for name, fn := range a.bindings {
-		if err := a.webview.Bind(name, fn); err != nil {
+		if err := w.Bind(name, fn); err != nil {
 			return fmt.Errorf("failed to bind %s: %w", name, err)
 		}
 	}
@@ -279,34 +460,45 @@ func (a *App) Run() error {
 	// Inject bindings bridge
 	a.injectBindingsBridge()
 
-	// Load HTML if provided - set URL before Run so browser is created with it
+	// Set chromeless and frameless mode on webview
+	if wv, ok := w.(*webview); ok {
+		wv.resizable = a.config.Resizable
+		wv.fullscreen = a.config.Fullscreen
+		wv.maximized = a.config.Maximized
+		wv.x = a.config.X
+		wv.y = a.config.Y
+		wv.frameless = a.config.Frameless
+		wv.chromeless = a.config.Chromeless
+		wv.dataPath = a.config.DataPath
+		wv.browserPath = a.config.BrowserPath
+		wv.additionalBrowserArgs = append([]string(nil), a.config.AdditionalBrowserArgs...)
+		wv.language = a.config.Language
+		wv.targetCompatibleBrowserVersion = a.config.TargetCompatibleBrowserVersion
+		wv.allowSingleSignOnUsingOSPrimaryAccount = a.config.AllowSingleSignOnUsingOSPrimaryAccount
+		wv.exclusiveUserDataFolderAccess = a.config.ExclusiveUserDataFolderAccess
+	}
+
+	// Load HTML if provided
 	if a.html != "" {
-		// Type assert to set URL and chromeless/frameless mode before browser creation
-		if wv, ok := a.webview.(*webview); ok {
-			// Use about:blank first, then inject HTML via JavaScript for better compatibility
-			wv.SetURL("about:blank")
-			// Store HTML for injection after load
+		if wv, ok := w.(*webview); ok {
 			wv.htmlContent = a.html
-			// Set chromeless and frameless mode
-			wv.chromeless = a.config.Chromeless
-			wv.frameless = a.config.Frameless
 		}
 	}
 
-	// Run the webview (chromeless mode set via DisableGPU flags if needed)
-	if a.config.Chromeless {
-		cef.DisableGPU() // Helps with chromeless rendering
-	}
-	a.webview.Run()
+	// Run the webview
+	w.Run()
 
 	return nil
 }
 
 // injectBindingsBridge injects JavaScript to set up window.go namespace
 func (a *App) injectBindingsBridge() {
+	if a.webview == nil {
+		return
+	}
 	// Create the bindings bridge that exposes window.go.* functions
 	bridge := `
-		window.go = {};
+		window.go = window.go || {};
 		window.__goInvoke = async function(name, args) {
 			const fn = window[name];
 			if (!fn) throw new Error('Function ' + name + ' not found');
