@@ -1,6 +1,6 @@
 module github.com/xelus/go-webview-cef
 
-go 1.21
+go 1.26
 
 require (
 )

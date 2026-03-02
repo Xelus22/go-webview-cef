@@ -78,6 +78,18 @@ static int handle_process_message(cef_browser_t* browser, cef_frame_t* frame,
                                    cef_process_id_t source_process,
                                    cef_process_message_t* message);
 
+static int join_path(char* out, size_t out_size, const char* base, const char* suffix) {
+    size_t base_len = strlen(base);
+    size_t suffix_len = strlen(suffix);
+    if (base_len + suffix_len + 1 > out_size) {
+        return 0;
+    }
+    memcpy(out, base, base_len);
+    memcpy(out + base_len, suffix, suffix_len);
+    out[base_len + suffix_len] = '\0';
+    return 1;
+}
+
 //
 // Reference counting helpers
 //
@@ -673,12 +685,19 @@ static int handle_process_message(cef_browser_t* browser, cef_frame_t* frame,
     if (!name) return 0;
 
     // Check if this is our IPC message
-    if (cef_string_utf16_cmp(name, u"go_invoke") == 0) {
+    char msg_name[64] = {0};
+    int is_go_invoke = 0;
+    cef_string_utf8_t msg_name_utf8 = {};
+    cef_string_utf16_to_utf8(name->str, name->length, &msg_name_utf8);
+    if (msg_name_utf8.str) {
+        strncpy(msg_name, msg_name_utf8.str, sizeof(msg_name) - 1);
+        cef_string_utf8_clear(&msg_name_utf8);
+        is_go_invoke = (strcmp(msg_name, "go_invoke") == 0);
+    }
+
+    if (is_go_invoke) {
         cef_list_value_t* args = message->get_argument_list(message);
         if (args && args->get_size(args) >= 2) {
-            cef_string_t name_str = {};
-            cef_string_t payload_str = {};
-
             cef_string_userfree_t name_val = args->get_string(args, 0);
             cef_string_userfree_t payload_val = args->get_string(args, 1);
 
@@ -816,11 +835,15 @@ int cef_runtime_initialize(int argc, char** argv) {
         static cef_string_t locales_path = {};
 
         // Cache path
-        snprintf(path_str, sizeof(path_str), "%s/cef_cache", cwd);
-        mkdir(path_str, 0755);
-        cef_string_utf8_to_utf16(path_str, strlen(path_str), &cache_path);
-        settings.cache_path = cache_path;
-        settings.root_cache_path = root_cache_path;
+        if (join_path(path_str, sizeof(path_str), cwd, "/cef_cache")) {
+            mkdir(path_str, 0755);
+            cef_string_utf8_to_utf16(path_str, strlen(path_str), &cache_path);
+            settings.cache_path = cache_path;
+            cef_string_utf8_to_utf16(path_str, strlen(path_str), &root_cache_path);
+            settings.root_cache_path = root_cache_path;
+        } else {
+            CEF_RUNTIME_LOG(LOG_WARNING, "Skipping cache path: cwd path too long");
+        }
 
         // Resources path
         snprintf(path_str, sizeof(path_str), "%s", cwd);
@@ -828,15 +851,21 @@ int cef_runtime_initialize(int argc, char** argv) {
         settings.resources_dir_path = resources_path;
 
         // Locales path
-        snprintf(path_str, sizeof(path_str), "%s/locales", cwd);
-        cef_string_utf8_to_utf16(path_str, strlen(path_str), &locales_path);
-        settings.locales_dir_path = locales_path;
+        if (join_path(path_str, sizeof(path_str), cwd, "/locales")) {
+            cef_string_utf8_to_utf16(path_str, strlen(path_str), &locales_path);
+            settings.locales_dir_path = locales_path;
+        } else {
+            CEF_RUNTIME_LOG(LOG_WARNING, "Skipping locales path: cwd path too long");
+        }
 
         // Subprocess path (for renderer process)
         static cef_string_t subprocess_path = {};
-        snprintf(path_str, sizeof(path_str), "%s/cef_subprocess", cwd);
-        cef_string_utf8_to_utf16(path_str, strlen(path_str), &subprocess_path);
-        settings.browser_subprocess_path = subprocess_path;
+        if (join_path(path_str, sizeof(path_str), cwd, "/cef_subprocess")) {
+            cef_string_utf8_to_utf16(path_str, strlen(path_str), &subprocess_path);
+            settings.browser_subprocess_path = subprocess_path;
+        } else {
+            CEF_RUNTIME_LOG(LOG_WARNING, "Skipping subprocess path: cwd path too long");
+        }
     }
 
     // Step 6: Initialize CEF

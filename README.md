@@ -2,7 +2,7 @@
 
 A cross-platform Go binding for Chromium Embedded Framework (CEF) providing a webview-compatible API for building desktop applications with web technologies.
 
-[![Go Version](https://img.shields.io/badge/go-1.21+-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/go-1.26+-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ## Features
@@ -28,7 +28,7 @@ A cross-platform Go binding for Chromium Embedded Framework (CEF) providing a we
 
 ### Prerequisites
 
-- Go 1.21 or later
+- Go 1.26 or later
 - C compiler (gcc/clang on Linux/macOS, MinGW on Windows)
 - For WSL: WSL2 with WSLg support (`xeyes` should work)
 - For Linux: X11 or Wayland display server
