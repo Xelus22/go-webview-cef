@@ -4,11 +4,10 @@ import (
 	"log"
 
 	"github.com/xelus/go-webview-cef/adapter/webview"
-	"github.com/xelus/go-webview-cef/cef"
 )
 
 func main() {
-	cef.DisableGPU()
+	// cef.DisableGPU()
 
 	app := webview.NewApp(webview.AppConfig{
 		Title:      "My CEF App",

@@ -58,35 +58,20 @@ go run scripts/setup_cef.go
 package main
 
 import (
-    "os"
     "github.com/xelus/go-webview-cef/adapter/webview"
-    "github.com/xelus/go-webview-cef/internal/cef"
 )
 
 func main() {
-    // Set command line args
-    cef.SetArgs(len(os.Args), os.Args)
-    
-    // Handle subprocess (CEF multi-process model)
-    if cef.IsSubprocess() {
-        cef.SubprocessEntry()
-        return
-    }
-
-    // Create webview
     w := webview.New(false)
     defer w.Destroy()
 
-    // Bind a Go function
     w.Bind("add", func(a, b int) int {
         return a + b
     })
 
-    // Set window properties
     w.SetTitle("My App")
     w.SetSize(1024, 768, webview.HintNone)
 
-    // Load HTML
     w.Navigate(`data:text/html,<!DOCTYPE html>
 <html>
 <body>
@@ -101,7 +86,6 @@ func main() {
 </body>
 </html>`)
 
-    // Run
     w.Run()
 }
 ```
@@ -142,23 +126,15 @@ const (
 ```
 .
 ├── adapter/webview/          # WebView-compatible API
-│   ├── webview.go           # Main webview implementation
-│   └── types.go             # Type definitions
-├── example/                  # Example application
-│   └── main.go              # Demo usage
-├── internal/cef/             # Go CEF bindings
-│   ├── cef_linux.go         # Linux-specific implementation
-│   ├── cef_darwin.go        # macOS-specific implementation
-│   ├── cef_windows.go       # Windows-specific implementation
-│   ├── browser.go           # Browser management
-│   ├── cef_wrapper.h        # C wrapper header
-│   └── cef_wrapper.c        # C wrapper implementation
-├── scripts/
-│   └── setup_cef.go         # CEF downloader (cross-platform)
+├── cef/                      # Public API wrappers
+├── internal/cefbindings/     # Generated binding types (committed)
+├── internal/cefruntime/      # Go-owned runtime state/lifecycle/IPC
+├── internal/cefshim/         # Minimal cgo/ABI shim + CEF runtime C file
+├── runtime/cef_runtime.h     # Stable C ABI boundary header
+├── scripts/                  # Setup + diagnostics + generators
+├── example/                  # Example apps
 ├── third_party/cef/          # Downloaded CEF binaries (gitignored)
-├── run.sh                    # Build & run script (Linux/macOS)
-├── Makefile                  # Build automation
-└── README.md                 # This file
+└── run.sh                    # Build & run script
 ```
 
 ## Build Commands
@@ -203,15 +179,11 @@ go build -o build/demo.exe ./cmd/demo
 
 ## CEF Configuration
 
-The implementation uses CEF's C API and includes platform-specific optimizations:
+The implementation uses CEF's C API with a Go-first runtime architecture:
 
-### Platform-Specific Files
-
-Go build constraints automatically select the correct implementation:
-
-- **Linux**: `internal/cef/cef_linux.go`
-- **macOS**: `internal/cef/cef_darwin.go`  
-- **Windows**: `internal/cef/cef_windows.go`
+- `internal/cefruntime`: Go lifecycle, browser registry, JS bridge dispatch.
+- `internal/cefshim`: minimal cgo boundary and callback trampolines.
+- `internal/cefshim/cef_runtime_impl.c`: single active C runtime implementation.
 
 ### CEF Download URLs
 
@@ -282,13 +254,15 @@ go run scripts/setup_cef.go
 ├─────────────────┤
 │ WebView Adapter │  webview.New(), w.Run()
 ├─────────────────┤
-│  Go CEF Bindings│  Platform-specific (cef_linux.go, etc.)
+│  cef package     │  Public compatibility wrappers
 ├─────────────────┤
-│  cgo + C Wrapper│  cef_wrapper.c
+│  Go Runtime Core │  internal/cefruntime
 ├─────────────────┤
-│   CEF C API     │  cef_initialize(), cef_browser_create()
+│  ABI Shim (cgo)  │  internal/cefshim
 ├─────────────────┤
-│   libcef        │  Chromium Embedded Framework
+│   CEF C API      │  cef_initialize(), cef_browser_create()
+├─────────────────┤
+│   libcef         │  Chromium Embedded Framework
 └─────────────────┘
 ```
 

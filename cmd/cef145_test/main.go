@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/xelus/go-webview-cef/internal/cef"
+	"github.com/xelus/go-webview-cef/cef"
 )
 
 func main() {
 	fmt.Println("CEF 145 Test - Starting...")
 
 	// Add flags to disable GPU and avoid GPU process issues
+	cef.DisableGPU()
 	os.Args = append(os.Args, "--disable-gpu", "--disable-gpu-compositing")
 
 	// Initialize CEF (handles subprocess internally)
@@ -21,7 +22,13 @@ func main() {
 	fmt.Println("CEF initialized (browser process)!")
 
 	fmt.Println("Creating browser...")
-	browser := cef.NewBrowser("https://www.google.com", 1024, 768)
+	browser := cef.New(cef.Options{
+		Title:     "CEF 145 Test",
+		URL:       "https://www.google.com",
+		Width:     1024,
+		Height:    768,
+		Resizable: true,
+	})
 	if browser == nil {
 		fmt.Println("Browser creation returned nil!")
 		cef.Shutdown()
@@ -30,7 +37,7 @@ func main() {
 	fmt.Println("Browser created successfully!")
 
 	fmt.Println("Running message loop (blocking)...")
-	cef.Run()
+	browser.Run()
 
 	fmt.Println("Shutting down...")
 	browser.Destroy()

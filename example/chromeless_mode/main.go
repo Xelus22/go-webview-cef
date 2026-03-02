@@ -9,7 +9,7 @@ import (
 
 func main() {
 	// Disable GPU for container/VM environments without display access.
-	cef.DisableGPU()
+	// cef.DisableGPU()
 	cef.Initialize()
 	defer cef.Shutdown()
 

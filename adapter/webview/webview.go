@@ -131,6 +131,7 @@ type webview struct {
 	htmlContent string
 	chromeless  bool
 	frameless   bool
+	gpuMode     cef.GPUMode
 	initScripts []string
 
 	// WebView2-compat options mapped when possible and warned when unsupported.
@@ -183,6 +184,7 @@ func (w *webview) Run() {
 	opts.Y = w.y
 	opts.Frameless = w.frameless
 	opts.Chromeless = w.chromeless
+	opts.GPUMode = w.gpuMode
 	if w.htmlContent != "" {
 		opts.URL = "about:blank"
 	} else {
@@ -386,6 +388,7 @@ type AppConfig struct {
 	Debug      bool
 	Chromeless bool // Remove browser decorations (no URL bar, etc.)
 	Frameless  bool // Remove OS window decorations (no title bar, borders)
+	GPUMode    cef.GPUMode
 
 	// WebView2-compat environment options.
 	DataPath                               string
@@ -469,6 +472,7 @@ func (a *App) Run() error {
 		wv.y = a.config.Y
 		wv.frameless = a.config.Frameless
 		wv.chromeless = a.config.Chromeless
+		wv.gpuMode = a.config.GPUMode
 		wv.dataPath = a.config.DataPath
 		wv.browserPath = a.config.BrowserPath
 		wv.additionalBrowserArgs = append([]string(nil), a.config.AdditionalBrowserArgs...)

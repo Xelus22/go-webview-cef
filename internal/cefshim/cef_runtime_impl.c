@@ -90,6 +90,35 @@ static int join_path(char* out, size_t out_size, const char* base, const char* s
     return 1;
 }
 
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+static void url_decode(char* dst, size_t dst_size, const char* src) {
+    if (!dst || dst_size == 0) return;
+    size_t di = 0;
+    for (size_t si = 0; src && src[si] != '\0' && di + 1 < dst_size; si++) {
+        if (src[si] == '%' && src[si + 1] && src[si + 2]) {
+            int hi = hex_value(src[si + 1]);
+            int lo = hex_value(src[si + 2]);
+            if (hi >= 0 && lo >= 0) {
+                dst[di++] = (char)((hi << 4) | lo);
+                si += 2;
+                continue;
+            }
+        }
+        if (src[si] == '+') {
+            dst[di++] = ' ';
+        } else {
+            dst[di++] = src[si];
+        }
+    }
+    dst[di] = '\0';
+}
+
 //
 // Reference counting helpers
 //
@@ -473,6 +502,126 @@ typedef struct {
     atomic_int ref_count;
 } load_handler_t;
 
+//
+// Request Handler
+//
+
+typedef struct {
+    cef_request_handler_t handler;
+    atomic_int ref_count;
+} request_handler_t;
+
+static void CEF_CALLBACK rh_add_ref(cef_base_ref_counted_t* self) {
+    request_handler_t* handler = (request_handler_t*)((char*)self - offsetof(request_handler_t, handler.base));
+    atomic_fetch_add(&handler->ref_count, 1);
+}
+
+static int CEF_CALLBACK rh_release(cef_base_ref_counted_t* self) {
+    request_handler_t* handler = (request_handler_t*)((char*)self - offsetof(request_handler_t, handler.base));
+    int count = atomic_fetch_sub(&handler->ref_count, 1) - 1;
+    if (count == 0) {
+        free(handler);
+        return 1;
+    }
+    return 0;
+}
+
+static int CEF_CALLBACK rh_has_one_ref(cef_base_ref_counted_t* self) {
+    request_handler_t* handler = (request_handler_t*)((char*)self - offsetof(request_handler_t, handler.base));
+    return atomic_load(&handler->ref_count) == 1;
+}
+
+static int CEF_CALLBACK rh_has_at_least_one_ref(cef_base_ref_counted_t* self) {
+    request_handler_t* handler = (request_handler_t*)((char*)self - offsetof(request_handler_t, handler.base));
+    return atomic_load(&handler->ref_count) >= 1;
+}
+
+static int CEF_CALLBACK rh_on_before_browse(
+    struct _cef_request_handler_t* self,
+    struct _cef_browser_t* browser,
+    struct _cef_frame_t* frame,
+    struct _cef_request_t* request,
+    int user_gesture,
+    int is_redirect) {
+    (void)self;
+    (void)browser;
+    (void)frame;
+    (void)user_gesture;
+    (void)is_redirect;
+
+    if (!request || !request->get_url) return 0;
+
+    cef_string_userfree_t url = request->get_url(request);
+    if (!url) return 0;
+
+    cef_string_utf8_t url_utf8 = {};
+    cef_string_utf16_to_utf8(url->str, url->length, &url_utf8);
+    cef_string_userfree_free(url);
+
+    if (!url_utf8.str) return 0;
+
+    int handled = 0;
+    const char* prefix = "goinvoke://invoke?";
+    size_t prefix_len = strlen(prefix);
+    if (strncmp(url_utf8.str, prefix, prefix_len) == 0) {
+        const char* query = url_utf8.str + prefix_len;
+        char name_enc[512] = {0};
+        char payload_enc[4096] = {0};
+
+        const char* p = query;
+        while (*p) {
+            const char* key_start = p;
+            const char* eq = strchr(p, '=');
+            if (!eq) break;
+            const char* amp = strchr(eq + 1, '&');
+            size_t key_len = (size_t)(eq - key_start);
+            size_t val_len = amp ? (size_t)(amp - (eq + 1)) : strlen(eq + 1);
+
+            if (key_len == 4 && strncmp(key_start, "name", 4) == 0) {
+                size_t n = val_len < sizeof(name_enc) - 1 ? val_len : sizeof(name_enc) - 1;
+                memcpy(name_enc, eq + 1, n);
+                name_enc[n] = '\0';
+            } else if (key_len == 7 && strncmp(key_start, "payload", 7) == 0) {
+                size_t n = val_len < sizeof(payload_enc) - 1 ? val_len : sizeof(payload_enc) - 1;
+                memcpy(payload_enc, eq + 1, n);
+                payload_enc[n] = '\0';
+            }
+
+            if (!amp) break;
+            p = amp + 1;
+        }
+
+        char name[512] = {0};
+        char payload[4096] = {0};
+        url_decode(name, sizeof(name), name_enc);
+        url_decode(payload, sizeof(payload), payload_enc);
+
+        if (g_message_callback && name[0] != '\0') {
+            CEF_RUNTIME_LOG(LOG_INFO, "goinvoke intercepted: name=%s payload_len=%zu", name, strlen(payload));
+            g_message_callback(name, payload, g_message_user_data);
+        }
+        handled = 1;
+    }
+
+    cef_string_utf8_clear(&url_utf8);
+    return handled;
+}
+
+static request_handler_t* create_request_handler(void) {
+    request_handler_t* handler = (request_handler_t*)calloc(1, sizeof(request_handler_t));
+    if (!handler) return NULL;
+
+    handler->handler.base.size = sizeof(cef_request_handler_t);
+    handler->handler.base.add_ref = rh_add_ref;
+    handler->handler.base.release = rh_release;
+    handler->handler.base.has_one_ref = rh_has_one_ref;
+    handler->handler.base.has_at_least_one_ref = rh_has_at_least_one_ref;
+    handler->handler.on_before_browse = rh_on_before_browse;
+
+    atomic_store(&handler->ref_count, 1);
+    return handler;
+}
+
 static void CEF_CALLBACK lh_add_ref(cef_base_ref_counted_t* self) {
     load_handler_t* handler = (load_handler_t*)((char*)self - offsetof(load_handler_t, handler.base));
     atomic_fetch_add(&handler->ref_count, 1);
@@ -641,6 +790,17 @@ static struct _cef_load_handler_t* CEF_CALLBACK client_get_load_handler(
     return NULL;
 }
 
+static struct _cef_request_handler_t* CEF_CALLBACK client_get_request_handler(
+    struct _cef_client_t* self) {
+    (void)self;
+    request_handler_t* handler = create_request_handler();
+    if (handler) {
+        handler->handler.base.add_ref(&handler->handler.base);
+        return &handler->handler;
+    }
+    return NULL;
+}
+
 static int CEF_CALLBACK client_on_process_message_received(
     struct _cef_client_t* self,
     struct _cef_browser_t* browser,
@@ -664,6 +824,7 @@ static client_wrapper_t* create_client(void) {
     client->client.get_context_menu_handler = client_get_context_menu_handler;
     client->client.get_life_span_handler = client_get_life_span_handler;
     client->client.get_load_handler = client_get_load_handler;
+    client->client.get_request_handler = client_get_request_handler;
     client->client.on_process_message_received = client_on_process_message_received;
 
     atomic_store(&client->ref_count, 1);
@@ -747,9 +908,9 @@ static void inject_bridge_js(cef_browser_t* browser) {
         "window.__goCallbacks = window.__goCallbacks || {};"
         "window.go.invoke = function(name, payload) {"
         "  if (typeof payload === 'object') payload = JSON.stringify(payload);"
-        "  if (typeof cef !== 'undefined' && cef.postMessage) {"
-        "    cef.postMessage(JSON.stringify({type: 'go_invoke', name: name, payload: payload}));"
-        "  }"
+        "  var u = 'goinvoke://invoke?name=' + encodeURIComponent(name)"
+        "        + '&payload=' + encodeURIComponent(payload || '');"
+        "  window.location.href = u;"
         "};"
         "window.__goDispatch = function(name, payload) {"
         "  if (window.__goHandlers && window.__goHandlers[name]) {"
@@ -908,6 +1069,17 @@ void cef_runtime_shutdown(void) {
     }
 
     cef_shutdown();
+
+#ifdef __linux__
+    if (g_x11_display) {
+        if (g_x11_parent_window) {
+            XDestroyWindow(g_x11_display, g_x11_parent_window);
+            g_x11_parent_window = 0;
+        }
+        XCloseDisplay(g_x11_display);
+        g_x11_display = NULL;
+    }
+#endif
 
     if (g_app) {
         g_app->base.release(&g_app->base);
@@ -1142,28 +1314,122 @@ void cef_runtime_eval(cef_runtime_browser_t browser, const char* js) {
 }
 
 void cef_runtime_set_title(cef_runtime_browser_t browser, const char* title) {
-    (void)browser;
-    (void)title;
-    // Platform-specific implementation needed
-    CEF_RUNTIME_LOG(LOG_WARNING, "set_title not implemented");
+    if (!browser || !title) return;
+
+    cef_browser_t* b = (cef_browser_t*)browser;
+    cef_browser_host_t* host = b->get_host(b);
+    if (!host) return;
+
+#ifdef __linux__
+    cef_window_handle_t window_handle = host->get_window_handle(host);
+    if (window_handle) {
+        Display* display = g_x11_display;
+        int should_close = 0;
+        if (!display) {
+            display = XOpenDisplay(NULL);
+            should_close = display != NULL;
+        }
+        if (display) {
+            XStoreName(display, (Window)window_handle, title);
+            XFlush(display);
+            if (should_close) {
+                XCloseDisplay(display);
+            }
+        }
+    }
+#endif
+
+    host->base.release(&host->base);
 }
 
 void cef_runtime_resize(cef_runtime_browser_t browser, int width, int height) {
-    (void)browser;
-    (void)width;
-    (void)height;
-    // Platform-specific implementation needed
-    CEF_RUNTIME_LOG(LOG_WARNING, "resize not implemented");
+    if (!browser || width <= 0 || height <= 0) return;
+
+    cef_browser_t* b = (cef_browser_t*)browser;
+    cef_browser_host_t* host = b->get_host(b);
+    if (!host) return;
+
+#ifdef __linux__
+    cef_window_handle_t window_handle = host->get_window_handle(host);
+    if (window_handle) {
+        Display* display = g_x11_display;
+        int should_close = 0;
+        if (!display) {
+            display = XOpenDisplay(NULL);
+            should_close = display != NULL;
+        }
+        if (display) {
+            XResizeWindow(display, (Window)window_handle, (unsigned int)width, (unsigned int)height);
+            XFlush(display);
+            if (should_close) {
+                XCloseDisplay(display);
+            }
+        }
+    }
+#endif
+
+    if (host->was_resized) {
+        host->was_resized(host);
+    }
+    host->base.release(&host->base);
 }
 
 void cef_runtime_show(cef_runtime_browser_t browser) {
-    (void)browser;
-    // Platform-specific implementation needed
+    if (!browser) return;
+
+    cef_browser_t* b = (cef_browser_t*)browser;
+    cef_browser_host_t* host = b->get_host(b);
+    if (!host) return;
+
+#ifdef __linux__
+    cef_window_handle_t window_handle = host->get_window_handle(host);
+    if (window_handle) {
+        Display* display = g_x11_display;
+        int should_close = 0;
+        if (!display) {
+            display = XOpenDisplay(NULL);
+            should_close = display != NULL;
+        }
+        if (display) {
+            XMapRaised(display, (Window)window_handle);
+            XFlush(display);
+            if (should_close) {
+                XCloseDisplay(display);
+            }
+        }
+    }
+#endif
+
+    host->base.release(&host->base);
 }
 
 void cef_runtime_hide(cef_runtime_browser_t browser) {
-    (void)browser;
-    // Platform-specific implementation needed
+    if (!browser) return;
+
+    cef_browser_t* b = (cef_browser_t*)browser;
+    cef_browser_host_t* host = b->get_host(b);
+    if (!host) return;
+
+#ifdef __linux__
+    cef_window_handle_t window_handle = host->get_window_handle(host);
+    if (window_handle) {
+        Display* display = g_x11_display;
+        int should_close = 0;
+        if (!display) {
+            display = XOpenDisplay(NULL);
+            should_close = display != NULL;
+        }
+        if (display) {
+            XUnmapWindow(display, (Window)window_handle);
+            XFlush(display);
+            if (should_close) {
+                XCloseDisplay(display);
+            }
+        }
+    }
+#endif
+
+    host->base.release(&host->base);
 }
 
 void cef_runtime_close(cef_runtime_browser_t browser) {
