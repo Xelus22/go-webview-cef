@@ -391,7 +391,11 @@ static void CEF_CALLBACK lsh_on_before_close(
             g_browsers[i].browser->base.release(&g_browsers[i].browser->base);
             g_browsers[i].valid = 0;
             g_browsers[i].browser = NULL;
-            atomic_fetch_sub(&g_browser_count, 1);
+            int remaining = atomic_fetch_sub(&g_browser_count, 1) - 1;
+            if (remaining <= 0) {
+                CEF_RUNTIME_LOG(LOG_INFO, "Last browser closed, quitting message loop");
+                cef_quit_message_loop();
+            }
             break;
         }
     }
@@ -917,55 +921,57 @@ cef_runtime_browser_t cef_runtime_create_browser(const cef_runtime_browser_opts_
     cef_string_utf8_to_utf16(title, strlen(title), &window_info.window_name);
 
 #ifdef __linux__
-    // Create X11 parent window for proper embedding (like the old working code)
+    // Create an X11 parent window only for frameless mode.
+    // In normal framed mode we let CEF/WM own the top-level window so that
+    // native maximize/close behaviors and resize propagation work reliably.
     Window parent_window = 0;
     Display* display = NULL;
     
-    display = XOpenDisplay(NULL);
-    if (display) {
-        int screen = DefaultScreen(display);
-        Window root = RootWindow(display, screen);
-        
-        // Create a window
-        XSetWindowAttributes attrs;
-        attrs.event_mask = ExposureMask | KeyPressMask | KeyReleaseMask |
-                          ButtonPressMask | ButtonReleaseMask | PointerMotionMask |
-                          FocusChangeMask | StructureNotifyMask;
-        
-        unsigned long attr_mask = CWEventMask;
-        
-        parent_window = XCreateWindow(
-            display, root,
-            opts->x >= 0 ? opts->x : 100, 
-            opts->y >= 0 ? opts->y : 100, 
-            width, height, 0,
-            CopyFromParent, InputOutput, CopyFromParent,
-            attr_mask, &attrs
-        );
-        
-        if (parent_window) {
-            // Set window attributes
-            XSetWindowAttributes win_attrs;
-            win_attrs.background_pixel = WhitePixel(display, screen);
-            win_attrs.border_pixel = BlackPixel(display, screen);
-            win_attrs.colormap = DefaultColormap(display, screen);
-            XChangeWindowAttributes(display, parent_window, CWBackPixel | CWBorderPixel | CWColormap, &win_attrs);
+    if (opts->frameless) {
+        display = XOpenDisplay(NULL);
+        if (display) {
+            int screen = DefaultScreen(display);
+            Window root = RootWindow(display, screen);
             
-            // Set window title
-            XStoreName(display, parent_window, title);
+            // Create a window
+            XSetWindowAttributes attrs;
+            attrs.event_mask = ExposureMask | KeyPressMask | KeyReleaseMask |
+                              ButtonPressMask | ButtonReleaseMask | PointerMotionMask |
+                              FocusChangeMask | StructureNotifyMask;
             
-            // Set WM_CLASS
-            XClassHint class_hint;
-            class_hint.res_name = (char*)title;
-            class_hint.res_class = (char*)title;
-            XSetClassHint(display, parent_window, &class_hint);
+            unsigned long attr_mask = CWEventMask;
             
-            // Set window protocols for close button
-            Atom wmDelete = XInternAtom(display, "WM_DELETE_WINDOW", False);
-            XSetWMProtocols(display, parent_window, &wmDelete, 1);
+            parent_window = XCreateWindow(
+                display, root,
+                opts->x >= 0 ? opts->x : 100, 
+                opts->y >= 0 ? opts->y : 100, 
+                width, height, 0,
+                CopyFromParent, InputOutput, CopyFromParent,
+                attr_mask, &attrs
+            );
             
-            // For frameless mode, remove window decorations
-            if (opts->frameless) {
+            if (parent_window) {
+                // Set window attributes
+                XSetWindowAttributes win_attrs;
+                win_attrs.background_pixel = WhitePixel(display, screen);
+                win_attrs.border_pixel = BlackPixel(display, screen);
+                win_attrs.colormap = DefaultColormap(display, screen);
+                XChangeWindowAttributes(display, parent_window, CWBackPixel | CWBorderPixel | CWColormap, &win_attrs);
+                
+                // Set window title
+                XStoreName(display, parent_window, title);
+                
+                // Set WM_CLASS
+                XClassHint class_hint;
+                class_hint.res_name = (char*)title;
+                class_hint.res_class = (char*)title;
+                XSetClassHint(display, parent_window, &class_hint);
+                
+                // Set window protocols for close button
+                Atom wmDelete = XInternAtom(display, "WM_DELETE_WINDOW", False);
+                XSetWMProtocols(display, parent_window, &wmDelete, 1);
+                
+                // For frameless mode, remove window decorations
                 Atom wmHints = XInternAtom(display, "_MOTIF_WM_HINTS", False);
                 struct {
                     unsigned long flags;
@@ -977,31 +983,33 @@ cef_runtime_browser_t cef_runtime_create_browser(const cef_runtime_browser_opts_
                 
                 XChangeProperty(display, parent_window, wmHints, wmHints, 32,
                                PropModeReplace, (unsigned char*)&hints, 5);
+                
+                // Set window type
+                Atom wmWindowType = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
+                Atom wmWindowTypeNormal = XInternAtom(display, "_NET_WM_WINDOW_TYPE_NORMAL", False);
+                XChangeProperty(display, parent_window, wmWindowType, XA_ATOM, 32,
+                               PropModeReplace, (unsigned char*)&wmWindowTypeNormal, 1);
+                
+                // Set size hints
+                XSizeHints* sizeHints = XAllocSizeHints();
+                if (sizeHints) {
+                    sizeHints->flags = PPosition | PSize;
+                    sizeHints->x = opts->x >= 0 ? opts->x : 100;
+                    sizeHints->y = opts->y >= 0 ? opts->y : 100;
+                    sizeHints->width = width;
+                    sizeHints->height = height;
+                    XSetWMNormalHints(display, parent_window, sizeHints);
+                    XFree(sizeHints);
+                }
+                
+                // DON'T map the window yet - wait for CEF to be created
+                XFlush(display);
+                
+                CEF_RUNTIME_LOG(LOG_INFO, "Created X11 parent window: %lu (not mapped yet)", parent_window);
             }
-            
-            // Set window type
-            Atom wmWindowType = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
-            Atom wmWindowTypeNormal = XInternAtom(display, "_NET_WM_WINDOW_TYPE_NORMAL", False);
-            XChangeProperty(display, parent_window, wmWindowType, XA_ATOM, 32,
-                           PropModeReplace, (unsigned char*)&wmWindowTypeNormal, 1);
-            
-            // Set size hints
-            XSizeHints* sizeHints = XAllocSizeHints();
-            if (sizeHints) {
-                sizeHints->flags = PPosition | PSize;
-                sizeHints->x = opts->x >= 0 ? opts->x : 100;
-                sizeHints->y = opts->y >= 0 ? opts->y : 100;
-                sizeHints->width = width;
-                sizeHints->height = height;
-                XSetWMNormalHints(display, parent_window, sizeHints);
-                XFree(sizeHints);
-            }
-            
-            // DON'T map the window yet - wait for CEF to be created
-            XFlush(display);
-            
-            CEF_RUNTIME_LOG(LOG_INFO, "Created X11 parent window: %lu (not mapped yet)", parent_window);
         }
+    } else {
+        CEF_RUNTIME_LOG(LOG_INFO, "Using CEF-managed native window (framed mode)");
     }
     
     // Set parent window for embedding
