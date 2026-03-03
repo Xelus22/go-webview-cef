@@ -7,17 +7,18 @@ type BrowserHandle uintptr
 
 // BrowserOptions mirrors cef_runtime_browser_opts_t from runtime/cef_runtime.h.
 type BrowserOptions struct {
-	URL        string
-	Title      string
-	Width      int
-	Height     int
-	Frameless  bool
-	Chromeless bool
-	Resizable  bool
-	Fullscreen bool
-	Maximized  bool
-	X          int
-	Y          int
+	URL          string
+	Title        string
+	Width        int
+	Height       int
+	Frameless    bool
+	Chromeless   bool
+	Resizable    bool
+	Fullscreen   bool
+	Maximized    bool
+	X            int
+	Y            int
+	ParentWindow uintptr
 }
 
 // DefaultBrowserOptions returns the CEF runtime defaults.

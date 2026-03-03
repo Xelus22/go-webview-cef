@@ -14,6 +14,7 @@
 extern "C" {
 #endif
 
+#include <stddef.h>
 #include <stdint.h>
 
 // Opaque handle to browser instance
@@ -22,6 +23,21 @@ typedef void* cef_runtime_browser_t;
 // Callback types for IPC
 typedef void (*cef_runtime_message_cb_t)(const char* name, const char* payload, void* user_data);
 typedef void (*cef_runtime_load_cb_t)(int success, void* user_data);
+typedef void (*cef_runtime_close_cb_t)(cef_runtime_browser_t browser, void* user_data);
+typedef int (*cef_runtime_request_cb_t)(
+    cef_runtime_browser_t browser,
+    const char* method,
+    const char* url,
+    const char* request_headers_json,
+    const uint8_t* request_body,
+    size_t request_body_len,
+    int* status_code,
+    char** status_text,
+    char** mime_type,
+    char** response_headers_json,
+    uint8_t** response_body,
+    size_t* response_body_len,
+    void* user_data);
 
 //
 // Lifecycle functions
@@ -34,6 +50,10 @@ int cef_runtime_initialize(int argc, char** argv);
 
 // Run the CEF message loop (browser process only)
 void cef_runtime_run(void);
+
+// Process a single CEF message loop iteration.
+// Useful when integrating CEF with an external/native app loop.
+void cef_runtime_do_message_loop_work(void);
 
 // Shutdown CEF runtime
 void cef_runtime_shutdown(void);
@@ -55,6 +75,7 @@ typedef struct {
     int maximized;             // 1 = maximized (default: 0)
     int x;                     // Window X position (default: centered)
     int y;                     // Window Y position (default: centered)
+    uintptr_t parent_window;   // Native parent handle for embedding (0 = standalone)
 } cef_runtime_browser_opts_t;
 
 // Default options helper
@@ -69,7 +90,8 @@ typedef struct {
     .fullscreen = 0, \
     .maximized = 0, \
     .x = -1, \
-    .y = -1 \
+    .y = -1, \
+    .parent_window = 0 \
 }
 
 // Create a browser window
@@ -133,6 +155,13 @@ void cef_runtime_set_dev_tools(cef_runtime_browser_t browser, int enabled);
 
 // Set callback for when page finishes loading
 void cef_runtime_set_load_callback(cef_runtime_load_cb_t callback, void* user_data);
+
+// Set callback for browser close events
+void cef_runtime_set_close_callback(cef_runtime_close_cb_t callback, void* user_data);
+
+// Set callback for in-process request interception.
+// Return 1 from callback to provide response values and handle request in-process.
+void cef_runtime_set_request_callback(cef_runtime_request_cb_t callback, void* user_data);
 
 //
 // Process message handler for IPC

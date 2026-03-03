@@ -12,6 +12,7 @@ package cefshim
 
 extern void goCEFMessageCallback(char* name, char* payload, void* user_data);
 extern void goCEFLoadCallback(int success, void* user_data);
+extern void goCEFCloseCallback(void* browser, void* user_data);
 
 static void message_callback_wrapper(const char* name, const char* payload, void* user_data) {
     goCEFMessageCallback((char*)name, (char*)payload, user_data);
@@ -28,6 +29,14 @@ static void load_callback_wrapper(int success, void* user_data) {
 static cef_runtime_load_cb_t get_load_callback() {
     return (cef_runtime_load_cb_t)load_callback_wrapper;
 }
+
+static void close_callback_wrapper(cef_runtime_browser_t browser, void* user_data) {
+    goCEFCloseCallback(browser, user_data);
+}
+
+static cef_runtime_close_cb_t get_close_callback() {
+    return (cef_runtime_close_cb_t)close_callback_wrapper;
+}
 */
 import "C"
 
@@ -42,6 +51,7 @@ var (
 	callbackMu      sync.RWMutex
 	messageCallback func(name, payload string, userData uintptr)
 	loadCallback    func(success bool, userData uintptr)
+	closeCallback   func(userData uintptr)
 
 	argsMu   sync.Mutex
 	initArgs []*C.char
@@ -94,6 +104,25 @@ func goCEFLoadCallback(success C.int, userData unsafe.Pointer) {
 	cb(success != 0, uintptr(userData))
 }
 
+// SetCloseDispatch sets the Go close dispatcher for browser close callbacks.
+func SetCloseDispatch(dispatcher func(userData uintptr)) {
+	callbackMu.Lock()
+	closeCallback = dispatcher
+	callbackMu.Unlock()
+}
+
+//export goCEFCloseCallback
+func goCEFCloseCallback(browser unsafe.Pointer, userData unsafe.Pointer) {
+	callbackMu.RLock()
+	cb := closeCallback
+	callbackMu.RUnlock()
+	if cb == nil {
+		return
+	}
+	_ = browser // Not used in this minimal version
+	cb(uintptr(userData))
+}
+
 // Initialize initializes the CEF runtime and executes subprocesses when needed.
 func Initialize(args []string) int {
 	argsMu.Lock()
@@ -123,6 +152,11 @@ func Initialize(args []string) int {
 // Run runs the main CEF message loop.
 func Run() {
 	C.cef_runtime_run()
+}
+
+// DoMessageLoopWork processes a single CEF message loop iteration.
+func DoMessageLoopWork() {
+	C.cef_runtime_do_message_loop_work()
 }
 
 // Shutdown shuts down CEF and releases shim-owned argv memory.

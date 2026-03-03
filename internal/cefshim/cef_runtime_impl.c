@@ -56,6 +56,10 @@ static cef_runtime_message_cb_t g_message_callback = NULL;
 static void* g_message_user_data = NULL;
 static cef_runtime_load_cb_t g_load_callback = NULL;
 static void* g_load_user_data = NULL;
+static cef_runtime_close_cb_t g_close_callback = NULL;
+static void* g_close_user_data = NULL;
+static cef_runtime_request_cb_t g_request_callback = NULL;
+static void* g_request_user_data = NULL;
 
 // Browser tracking
 #define MAX_BROWSERS 16
@@ -425,6 +429,10 @@ static void CEF_CALLBACK lsh_on_before_close(
     struct _cef_browser_t* browser) {
     (void)self;
     CEF_RUNTIME_LOG(LOG_INFO, "Browser closing");
+
+    if (g_close_callback) {
+        g_close_callback((cef_runtime_browser_t)browser, g_close_user_data);
+    }
 
     // Remove from tracking
     for (int i = 0; i < MAX_BROWSERS; i++) {
@@ -1502,6 +1510,23 @@ void cef_runtime_set_dev_tools(cef_runtime_browser_t browser, int enabled) {
 void cef_runtime_set_load_callback(cef_runtime_load_cb_t callback, void* user_data) {
     g_load_callback = callback;
     g_load_user_data = user_data;
+}
+
+void cef_runtime_set_close_callback(cef_runtime_close_cb_t callback, void* user_data) {
+    g_close_callback = callback;
+    g_close_user_data = user_data;
+}
+
+void cef_runtime_set_request_callback(cef_runtime_request_cb_t callback, void* user_data) {
+    g_request_callback = callback;
+    g_request_user_data = user_data;
+}
+
+void cef_runtime_do_message_loop_work(void) {
+    if (!g_initialized) {
+        return;
+    }
+    cef_do_message_loop_work();
 }
 
 void cef_runtime_post_message(const char* message) {
